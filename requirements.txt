@@ -1,8 +1,7 @@
-# requirements.txt
-openai-whisper==1.1.10
 python-telegram-bot==20.3
+whisper @ https://github.com/openai/whisper/archive/refs/tags/v20231117.zip
+torch==2.1.2 --extra-index-url https://download.pytorch.org/whl/cpu
 pandas==2.0.3
 openpyxl==3.1.2
 python-dotenv==1.0.0
 numpy==1.24.3
-torch==2.0.1 --extra-index-url https://download.pytorch.org/whl/cpu

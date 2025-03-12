@@ -3,7 +3,7 @@ import whisper
 import pandas as pd
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import logging
@@ -195,7 +195,7 @@ async def registrar_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Envíame los gastos en este formato:\n\n"
         "Ejemplo:\n"
         "15000 en perfumes. 2100 en verdura, tomate. 18000 en carne, bondiola\n\n"
-        "Usa puntos para separar cada gasto y 'en' para separar el monto de la descripción"
+        "Usa puntos para separar cada gasto y 'en' para separar el monto de la descripción. USAR PARENTESIS SOLO PARA ESPECIFICAR LA FECHA DEL GASTO"
     )
     return ESPERANDO_GASTOS
 
@@ -204,43 +204,82 @@ async def procesar_gastos_texto(update: Update, context: ContextTypes.DEFAULT_TY
     nombre_usuario = user.first_name or user.username or "Usuario desconocido"
     texto = update.message.text
     
+    def parsear_fecha(fecha_str: str) -> datetime:
+        hoy = datetime.now()
+        fecha_str = fecha_str.strip().lower()
+        
+        # Manejar fechas relativas
+        if fecha_str == 'ayer':
+            return hoy - timedelta(days=1)
+        if fecha_str == 'hoy':
+            return hoy
+        
+        # Manejar diferentes formatos de fecha
+        try:
+            # Formato DD-MM
+            if '-' in fecha_str and len(fecha_str.split('-')) == 2:
+                day, month = map(int, fecha_str.split('-'))
+                return hoy.replace(month=month, day=day, hour=hoy.hour, minute=hoy.minute)
+            
+            # Formato DD
+            if len(fecha_str) <= 2:
+                day = int(fecha_str)
+                return hoy.replace(day=day)
+            
+            # Formato DD/MM
+            if '/' in fecha_str and len(fecha_str.split('/')) == 2:
+                day, month = map(int, fecha_str.split('/'))
+                return hoy.replace(month=month, day=day, hour=hoy.hour, minute=hoy.minute)
+            
+        except ValueError:
+            raise ValueError(f"Formato de fecha inválido: {fecha_str}")
+        
+        # Si no coincide con ningún formato
+        raise ValueError(f"Formato de fecha no reconocido: {fecha_str}")
+
     try:
-        # Dividir transacciones usando el punto como separador
         transacciones_raw = [t.strip() for t in texto.split('.') if t.strip()]
         transacciones_procesadas = []
         
-        # Procesar cada transacción
-        patron = r'^\s*([\d\.,]+)\s+en\s+(.+?)\s*$'
+        # Nuevo patrón que incluye fecha opcional
+        patron = r'^\s*([\d\.,]+)\s+en\s+(.+?)(?:\s+\((.+?)\))?\s*$'
+        
         for i, trans in enumerate(transacciones_raw, 1):
             match = re.match(patron, trans, re.IGNORECASE)
             if not match:
                 raise ValueError(f"Formato incorrecto en transacción {i}: '{trans}'")
             
-            monto_str = match.group(1).replace(',', '.')
-            descripcion = match.group(2).capitalize()
+            monto_str, descripcion, fecha_str = match.groups()
+            fecha_str = fecha_str or 'hoy'  # Default a fecha actual
             
-            # Eliminar puntos como separadores de miles
+            # Procesar monto
+            monto_str = monto_str.replace(',', '.')
             if '.' in monto_str and ',' not in monto_str:
                 monto_str = monto_str.replace('.', '')
+            monto = float(monto_str)
             
+            # Procesar fecha
             try:
-                monto = float(monto_str)
-                transacciones_procesadas.append({
-                    "Tipo": "gasto",
-                    "Monto": monto,
-                    "Descripción": descripcion,
-                    "Usuario": nombre_usuario,
-                    "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
-            except ValueError:
-                raise ValueError(f"Monto inválido en transacción {i}: '{monto_str}'")
+                fecha = parsear_fecha(fecha_str)
+            except Exception as e:
+                raise ValueError(f"Error en fecha de transacción {i}: {str(e)}")
+            
+            # Validar fecha lógica
+            if fecha > datetime.now() + timedelta(days=1):
+                raise ValueError(f"Fecha futura no permitida en transacción {i}")
+            
+            transacciones_procesadas.append({
+                "Tipo": "gasto",
+                "Monto": monto,
+                "Descripción": descripcion.capitalize(),
+                "Usuario": nombre_usuario,
+                "Fecha": fecha.strftime("%Y-%m-%d %H:%M:%S")
+            })
         
-        # Guardar en Excel
         if transacciones_procesadas:
             guardar_en_excel(transacciones_procesadas)
-            respuesta = "✅ Gastos registrados:\n"
-            respuesta += "\n".join(
-                [f"- ${t['Monto']:.2f} en {t['Descripción']}" 
+            respuesta = "✅ Gastos registrados:\n" + "\n".join(
+                [f"- ${t['Monto']:.2f} en {t['Descripción']} ({datetime.strptime(t['Fecha'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y')})"
                  for t in transacciones_procesadas]
             )
         else:
@@ -251,6 +290,110 @@ async def procesar_gastos_texto(update: Update, context: ContextTypes.DEFAULT_TY
     
     await update.message.reply_text(respuesta)
     return ConversationHandler.END
+
+async def gasto_semanal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not os.path.exists(EXCEL_FILE):
+            await update.message.reply_text("📭 No hay registros de gastos aún")
+            return
+
+        df = pd.read_excel(EXCEL_FILE)
+        
+        # Convertir la columna de fecha a datetime
+        df['Fecha'] = pd.to_datetime(df['Fecha'])
+        
+        # Obtener fecha actual
+        hoy = datetime.now()
+        
+        # Calcular inicio de la semana (lunes)
+        inicio_semana = hoy - timedelta(days=hoy.weekday())
+        inicio_semana = inicio_semana.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Filtrar gastos de la semana actual
+        gastos_semana = df[
+            (df['Fecha'] >= inicio_semana) & 
+            (df['Tipo'].str.lower().isin(['gasto', 'compra']))
+        ]
+        
+        if gastos_semana.empty:
+            await update.message.reply_text("ℹ️ No hay gastos registrados esta semana")
+            return
+        
+        # Calcular total y resumen
+        total = gastos_semana['Monto'].sum()
+        detalles = gastos_semana.groupby('Descripción')['Monto'].sum().to_dict()
+        
+        # Formatear respuesta
+        respuesta = (
+            f"📊 *Resumen Semanal* ({inicio_semana.strftime('%d/%m')} - {hoy.strftime('%d/%m')})\n\n"
+            f"💰 *Total gastado:* ${total:.2f}\n\n"
+            "🔍 Detalles por categoría:\n"
+        )
+        
+        for categoria, monto in detalles.items():
+            respuesta += f"- {categoria}: ${monto:.2f}\n"
+        
+        await update.message.reply_text(respuesta, parse_mode="Markdown")
+        
+    except Exception as e:
+        logging.error(f"Error en gasto_semanal: {str(e)}")
+        await update.message.reply_text("❌ Error al calcular el gasto semanal")
+
+async def gasto_mensual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Diccionario de meses en español
+        MESES_ES = {
+            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+            5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+            9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+        }
+
+        if not os.path.exists(EXCEL_FILE):
+            await update.message.reply_text("📭 No hay registros de gastos aún")
+            return
+
+        df = pd.read_excel(EXCEL_FILE)
+        
+        # Convertir la columna de fecha a datetime
+        df['Fecha'] = pd.to_datetime(df['Fecha'])
+        
+        # Obtener fecha actual
+        hoy = datetime.now()
+        nombre_mes = MESES_ES[hoy.month]  # Obtener nombre del mes del diccionario
+        
+        # Calcular inicio del mes
+        inicio_mes = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Filtrar gastos del mes actual
+        gastos_mes = df[
+            (df['Fecha'] >= inicio_mes) & 
+            (df['Tipo'].str.lower().isin(['gasto', 'compra']))
+        ]
+        
+        if gastos_mes.empty:
+            await update.message.reply_text(f"ℹ️ No hay gastos registrados en {nombre_mes}")
+            return
+        
+        # Calcular total y resumen
+        total = gastos_mes['Monto'].sum()
+        detalles = gastos_mes.groupby('Descripción')['Monto'].sum().to_dict()
+        
+        # Formatear respuesta
+        respuesta = (
+            f"📅 *Resumen Mensual* ({inicio_mes.strftime('%d/%m')} - {hoy.strftime('%d/%m')})\n"
+            f"🗓️ Mes: {nombre_mes} {hoy.year}\n\n"
+            f"💰 *Total gastado:* ${total:.2f}\n\n"
+            "🔍 Detalles por categoría:\n"
+        )
+        
+        for categoria, monto in detalles.items():
+            respuesta += f"- {categoria}: ${monto:.2f}\n"
+        
+        await update.message.reply_text(respuesta, parse_mode="Markdown")
+        
+    except Exception as e:
+        logging.error(f"Error en gasto_mensual: {str(e)}")
+        await update.message.reply_text("❌ Error al calcular el gasto mensual")
 
 
 def main():
@@ -267,8 +410,10 @@ def main():
         },
         fallbacks=[]
     )
-    
+    application.add_handler(CommandHandler("gastosemanal", gasto_semanal))
     application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("gastomensual", gasto_mensual))
+    
     application.run_polling()
 
 

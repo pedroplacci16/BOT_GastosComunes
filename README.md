@@ -1,5 +1,7 @@
 # 1. Instalar dependencias del sistema
 sudo apt update && sudo apt install -y ffmpeg python3-pip python3-venv
+# Linux (Debian/Ubuntu):
+sudo apt-get install ffmpeg
 
 # 2. Instalar dependencias Python (CPU-only)
 pip install torch==2.0.1+cpu --index-url https://download.pytorch.org/whl/cpu

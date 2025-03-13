@@ -1,17 +1,22 @@
 import os
-import whisper
 import pandas as pd
 import re
 import unicodedata
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import CommandHandler
 import logging
+from GoogleTranscriptor import GoogleTranscriptor
+#from WhisperTranscriptor import WhisperTranscriptor
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-modelo = "base"
+modelo_whisper = "base"
 EXCEL_FILE = "gastos.xlsx"
+
+#transcriptor = WhisperTranscriptor(modelo_whisper)
+transcriptor = GoogleTranscriptor()
 
 def normalizar_texto(texto):
     texto = texto.lower()
@@ -91,9 +96,11 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_file = await context.bot.get_file(audio_file.file_id)
         await new_file.download_to_drive("audio")
         
-        model = whisper.load_model(modelo)
-        result = model.transcribe("audio")
-        texto_transcrito = result['text']
+        
+        #model = whisper.load_model(modelo)
+        #result = model.transcribe("audio")
+        #texto_transcrito = result['text']
+        texto_transcrito = await transcriptor.transcribir("audio")
         
         transacciones = procesar_texto(texto_transcrito, nombre_usuario)
         respuesta = f"🎤 *Usuario*: {nombre_usuario}\n📝 *Transcripción*:\n\n{texto_transcrito}\n\n"
@@ -122,7 +129,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if os.path.exists("audio"):
             os.remove("audio")
-from telegram.ext import CommandHandler
+
 
 async def eliminar_operacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
